@@ -3,4 +3,4 @@
 
 from datetime import datetime
 
-print("Hello, Akshat! 🎉  The time is", datetime.now())
+print("Hello, Akshat! Setup looks good. ✅  Time is", datetime.now())
