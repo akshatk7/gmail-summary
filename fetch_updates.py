@@ -294,8 +294,8 @@ def get_gmail_link(msg_id):
     """Generate a Gmail web link to the email by its message ID."""
     # Properly encode the message ID for URL safety
     encoded_msg_id = urllib.parse.quote(msg_id, safe='')
-    # Use Gmail search format which is more reliable for finding specific messages
-    return f"https://mail.google.com/mail/u/0/#search/{encoded_msg_id}"
+    # Use Gmail's RFC822 message ID search format - most reliable for specific emails
+    return f"https://mail.google.com/mail/u/0/#search/rfc822msgid:{encoded_msg_id}"
 
 
 def summarize_email_bullets(subject, sender, body, msg_id):
@@ -592,6 +592,15 @@ def main():
     print(f"🤖 Using model: {get_model_name()} ({CURRENT_MODEL} setting)")
     print(f"💡 To change models, edit CURRENT_MODEL in the script: 'fast', 'balanced', or 'best'")
     
+    # Test URL generation with sample message IDs
+    print("\n🔗 Testing URL generation:")
+    test_ids = ["18c1234567890abcdef", "18c1234567890abcdef_1234567890abcdef"]
+    for test_id in test_ids:
+        url = get_gmail_link(test_id)
+        print(f"  Message ID: {test_id}")
+        print(f"  Generated URL: {url}")
+    print()
+    
     service = get_service()
     total_costs = []  # Track all API costs
     
@@ -628,6 +637,12 @@ def main():
             total_costs.append(cost)
         
         if is_relevant:
+            # Debug: Print the URL for the first few emails
+            if len(qualifying_emails) < 3:
+                test_url = get_gmail_link(msg["id"])
+                print(f"  📧 Email {len(qualifying_emails)+1}: {subject[:50]}...")
+                print(f"     URL: {test_url}")
+            
             qualifying_emails.append({
                 "subject": subject, 
                 "sender": sender, 
