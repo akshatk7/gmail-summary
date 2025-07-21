@@ -6,6 +6,7 @@ Count messages in Updates & Promotions from the past 7 days.
 import os
 from dotenv import load_dotenv
 import openai
+import google.generativeai as genai
 from datetime import datetime, timedelta
 from gmail_service import get_service
 import base64
@@ -19,35 +20,70 @@ from bs4 import BeautifulSoup
 MODEL_CONFIG = {
     "fast": "gpt-3.5-turbo",  # Cheaper, faster
     "balanced": "gpt-4o",     # Good balance of cost/quality
-    "best": "gpt-4"           # Best quality, most expensive
+    "best": "gpt-4",          # Best quality, most expensive
+    "gemini-fast": "gemini-1.5-flash",  # Gemini's fastest model
+    "gemini-balanced": "gemini-1.5-pro",  # Gemini's balanced model
+    "gemini-best": "gemini-2.0-flash-exp"  # Gemini's best model
 }
 
 # Current model setting - change this to switch models
-CURRENT_MODEL = "balanced"  # Options: "fast", "balanced", "best"
+CURRENT_MODEL = "gemini-fast"  # Options: "fast", "balanced", "best", "gemini-fast", "gemini-balanced", "gemini-best"
 
 def get_openai_api_key():
     """Load the OpenAI API key from the .env file."""
     load_dotenv()
     return os.getenv("OPENAI_API_KEY")
 
+def get_gemini_api_key():
+    """Load the Gemini API key from the .env file."""
+    load_dotenv()
+    # Try both possible environment variable names
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    return api_key
+
 
 def get_model_name():
     """Get the current model name based on configuration."""
     return MODEL_CONFIG.get(CURRENT_MODEL, "gpt-4o")
 
+def is_gemini_model():
+    """Check if the current model is a Gemini model."""
+    return CURRENT_MODEL.startswith("gemini-")
+
 
 def estimate_cost(input_tokens, output_tokens, model_name):
     """Estimate the cost of an API call based on token usage."""
     # OpenAI pricing per 1K tokens (as of 2024)
-    pricing = {
+    openai_pricing = {
         "gpt-3.5-turbo": {"input": 0.0005, "output": 0.0015},  # $0.0005/$0.0015 per 1K tokens
         "gpt-4o": {"input": 0.005, "output": 0.015},           # $0.005/$0.015 per 1K tokens
         "gpt-4": {"input": 0.03, "output": 0.06}               # $0.03/$0.06 per 1K tokens
     }
     
-    model_pricing = pricing.get(model_name, pricing["gpt-4o"])
-    input_cost = (input_tokens / 1000) * model_pricing["input"]
-    output_cost = (output_tokens / 1000) * model_pricing["output"]
+    # Gemini pricing per 1M characters (as of 2024)
+    gemini_pricing = {
+        "gemini-1.5-flash": {"input": 0.075, "output": 0.30},      # $0.075/$0.30 per 1M chars
+        "gemini-1.5-pro": {"input": 3.50, "output": 10.50},        # $3.50/$10.50 per 1M chars
+        "gemini-2.0-flash-exp": {"input": 0.15, "output": 0.60}    # $0.15/$0.60 per 1M chars
+    }
+    
+    if model_name in openai_pricing:
+        model_pricing = openai_pricing[model_name]
+        input_cost = (input_tokens / 1000) * model_pricing["input"]
+        output_cost = (output_tokens / 1000) * model_pricing["output"]
+    elif model_name in gemini_pricing:
+        model_pricing = gemini_pricing[model_name]
+        # Convert tokens to characters (rough approximation: 1 token ≈ 4 characters)
+        input_chars = input_tokens * 4
+        output_chars = output_tokens * 4
+        input_cost = (input_chars / 1000000) * model_pricing["input"]
+        output_cost = (output_chars / 1000000) * model_pricing["output"]
+    else:
+        # Default to GPT-4o pricing
+        model_pricing = openai_pricing["gpt-4o"]
+        input_cost = (input_tokens / 1000) * model_pricing["input"]
+        output_cost = (output_tokens / 1000) * model_pricing["output"]
+    
     total_cost = input_cost + output_cost
     
     return {
@@ -82,9 +118,62 @@ def get_email_body(msg_detail):
     return msg_detail.get("snippet", "")
 
 
-def is_relevant_newsletter(subject, sender, body):
-    """Use OpenAI to classify if an email is a relevant newsletter, with reasoning and improved exclusion/inclusion logic."""
+def make_ai_call(prompt, max_tokens=1000, temperature=0.5):
+    """Make an API call to either OpenAI or Gemini based on current model setting."""
+    if is_gemini_model():
+        return make_gemini_call(prompt, max_tokens, temperature)
+    else:
+        return make_openai_call(prompt, max_tokens, temperature)
+
+def make_openai_call(prompt, max_tokens=1000, temperature=0.5):
+    """Make an API call to OpenAI."""
     openai.api_key = get_openai_api_key()
+    try:
+        response = openai.chat.completions.create(
+            model=get_model_name(),
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        if response and response.choices and response.choices[0].message and response.choices[0].message.content:
+            return response.choices[0].message.content.strip(), response.usage
+        else:
+            return "[No response]", None
+    except Exception as e:
+        return f"[Error: {e}]", None
+
+def make_gemini_call(prompt, max_tokens=1000, temperature=0.5):
+    """Make an API call to Gemini."""
+    try:
+        genai.configure(api_key=get_gemini_api_key())
+        model = genai.GenerativeModel(get_model_name())
+        response = model.generate_content(
+            prompt,
+            generation_config=genai.GenerationConfig(
+                max_output_tokens=max_tokens,
+                temperature=temperature
+            )
+        )
+        if response and response.text:
+            # Create a mock usage object similar to OpenAI's
+            class MockUsage:
+                def __init__(self, prompt_tokens, completion_tokens):
+                    self.prompt_tokens = prompt_tokens
+                    self.completion_tokens = completion_tokens
+            
+            # Rough token estimation (1 token ≈ 4 characters)
+            prompt_tokens = len(prompt) // 4
+            completion_tokens = len(response.text) // 4
+            usage = MockUsage(prompt_tokens, completion_tokens)
+            
+            return response.text.strip(), usage
+        else:
+            return "[No response]", None
+    except Exception as e:
+        return f"[Error: {e}]", None
+
+def is_relevant_newsletter(subject, sender, body):
+    """Use AI to classify if an email is a relevant newsletter, with reasoning and improved exclusion/inclusion logic."""
     prompt = (
         "You are an expert email assistant helping curate a weekly newsletter summary for a tech/product/VC leader.\n"
         "Given the following email, answer these two questions:\n"
@@ -95,50 +184,29 @@ def is_relevant_newsletter(subject, sender, body):
         f"Email details:\nSubject: {subject}\nSender: {sender}\nBody: {body[:1000]}\n\n"
         "Respond in this format:\nReason: [your reasoning]\nInclude: [yes/no]"
     )
-    try:
-        response = openai.chat.completions.create(
-            model=get_model_name(),
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=100,
-            temperature=0,
-        )
-        if response and response.choices and response.choices[0].message and response.choices[0].message.content:
-            content = response.choices[0].message.content.strip().lower()
-            include_line = next((line for line in content.splitlines() if line.startswith("include:")), "")
-            return "yes" in include_line, response.usage
-        else:
-            return False, None
-    except Exception as e:
-        return False, None
+    
+    content, usage = make_ai_call(prompt, max_tokens=100, temperature=0)
+    if content and "include:" in content.lower():
+        include_line = next((line for line in content.splitlines() if "include:" in line.lower()), "")
+        result = "yes" in include_line.lower()  # Convert to lowercase for comparison
+        return result, usage
+    else:
+        return False, usage
 
 
 def summarize_single_email(subject, sender, body):
-    """Use OpenAI to generate a detailed summary of a single email."""
-    openai.api_key = get_openai_api_key()
+    """Use AI to generate a detailed summary of a single email."""
     prompt = (
         "You are an expert newsletter summarizer. Read the following email and write a detailed, insightful summary (not just a sentence or two). "
         "Capture the main ideas, arguments, and any actionable insights.\n"
         f"Subject: {subject}\nSender: {sender}\nBody: {body}\n"
         "Summary: "
     )
-    try:
-        response = openai.chat.completions.create(
-            model=get_model_name(),
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=1000,
-            temperature=0.5,
-        )
-        if response and response.choices and response.choices[0].message and response.choices[0].message.content:
-            return response.choices[0].message.content.strip(), response.usage
-        else:
-            return "[Summary unavailable]", None
-    except Exception as e:
-        return f"[Summary unavailable: {e}]", None
+    return make_ai_call(prompt, max_tokens=1000, temperature=0.5)
 
 
 def merge_batch_summaries(batch_summaries_with_meta):
-    """Use OpenAI to merge a batch of email summaries into a section summary."""
-    openai.api_key = get_openai_api_key()
+    """Use AI to merge a batch of email summaries into a section summary."""
     email_summaries = "\n\n".join([
         f"{i+1}. Subject: {meta['subject']} | From: {meta['sender']}\nSummary: {meta['summary']}"
         for i, meta in enumerate(batch_summaries_with_meta)
@@ -153,21 +221,11 @@ def merge_batch_summaries(batch_summaries_with_meta):
         f"Here are the email summaries:\n{email_summaries}\n\n"
         "Write the section."
     )
-    response = openai.chat.completions.create(
-        model=get_model_name(),
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=2000,
-        temperature=0.5,
-    )
-    if response and response.choices and response.choices[0].message and response.choices[0].message.content:
-        return response.choices[0].message.content.strip(), response.usage
-    else:
-        return "[Section summary unavailable]", None
+    return make_ai_call(prompt, max_tokens=2000, temperature=0.5)
 
 
 def merge_sections_to_newsletter(section_summaries):
-    """Use OpenAI to merge section summaries into the final newsletter post."""
-    openai.api_key = get_openai_api_key()
+    """Use AI to merge section summaries into the final newsletter post."""
     sections_text = "\n\n".join(section_summaries)
     prompt = (
         "You are an expert newsletter editor. Merge the following newsletter sections into a single, cohesive, engaging, and insightful newsletter post for a tech/product leader.\n"
@@ -180,16 +238,7 @@ def merge_sections_to_newsletter(section_summaries):
         f"Here are the newsletter sections:\n{sections_text}\n\n"
         "Write the final newsletter post. At the end, include a section titled 'Sources' listing all the newsletters (subject and sender) you used."
     )
-    response = openai.chat.completions.create(
-        model=get_model_name(),
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=4000,
-        temperature=0.5,
-    )
-    if response and response.choices and response.choices[0].message and response.choices[0].message.content:
-        return response.choices[0].message.content.strip(), response.usage
-    else:
-        return "[Newsletter post unavailable]", None
+    return make_ai_call(prompt, max_tokens=4000, temperature=0.5)
 
 
 def fetch_and_print(service, label, label_name, read_status):
@@ -249,8 +298,7 @@ def get_gmail_link(msg_id):
 
 
 def summarize_email_bullets(subject, sender, body, msg_id):
-    """Use OpenAI to generate 2-3 bullet point key takeaways for an email with hyperlinks."""
-    openai.api_key = get_openai_api_key()
+    """Use AI to generate 2-3 bullet point key takeaways for an email with hyperlinks."""
     gmail_link = get_gmail_link(msg_id)
     prompt = (
         "You are an expert newsletter summarizer. Read the following email and write 2-3 bullet points with the key takeaways.\n"
@@ -259,23 +307,15 @@ def summarize_email_bullets(subject, sender, body, msg_id):
         "Example:\n<b>AI as a Catalyst:</b> AI is transforming industries by enabling more personalized and efficient solutions.\n"
         "Bullet points:"
     )
-    try:
-        response = openai.chat.completions.create(
-            model=get_model_name(),
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=300,
-            temperature=0.5,
-        )
-        if response and response.choices and response.choices[0].message and response.choices[0].message.content:
-            bullets = response.choices[0].message.content.strip()
-            lines = []
-            for bullet in bullets.split('\n'):
-                lines.append(bullet)
-            return '\n'.join(lines), response.usage
-        else:
-            return "- [Summary unavailable]", None
-    except Exception as e:
-        return f"- [Summary unavailable: {e}]", None
+    content, usage = make_ai_call(prompt, max_tokens=300, temperature=0.5)
+    if content:
+        bullets = content.strip()
+        lines = []
+        for bullet in bullets.split('\n'):
+            lines.append(bullet)
+        return '\n'.join(lines), usage
+    else:
+        return "- [Summary unavailable]", usage
 
 
 def extract_sender_name(sender):
@@ -322,8 +362,7 @@ def get_date_range_str(messages):
 
 
 def synthesize_newsletter_post(bullet_points_html):
-    """Use OpenAI to synthesize a cohesive, newsletter-style post from the bullet-pointed HTML summary, with proper HTML formatting and more emojis."""
-    openai.api_key = get_openai_api_key()
+    """Use AI to synthesize a cohesive, newsletter-style post from the bullet-pointed HTML summary, with proper HTML formatting and more emojis."""
     prompt = (
         "You are an expert newsletter editor. Here is a list of key takeaways from various newsletters, grouped by source. "
         "Please synthesize this into a single, engaging, newsletter-style post for a tech/product/VC leader. "
@@ -338,21 +377,11 @@ def synthesize_newsletter_post(bullet_points_html):
         f"Here are the takeaways (in HTML):\n{bullet_points_html}\n\n"
         "Write the newsletter post as HTML."
     )
-    response = openai.chat.completions.create(
-        model=get_model_name(),
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=3000,
-        temperature=0.5,
-    )
-    if response and response.choices and response.choices[0].message and response.choices[0].message.content:
-        return response.choices[0].message.content.strip(), response.usage
-    else:
-        return "[Newsletter post unavailable]", None
+    return make_ai_call(prompt, max_tokens=3000, temperature=0.5)
 
 
 def enhance_newsletter_with_review_agent(newsletter_html, original_bullets):
     """Use a second AI agent to review and enhance the newsletter, making it more detailed and educational."""
-    openai.api_key = get_openai_api_key()
     prompt = (
         "You are an expert newsletter reviewer and enhancer. Your job is to take a newsletter post and make it more detailed, educational, and insightful.\n\n"
         "The current newsletter post is:\n"
@@ -371,16 +400,11 @@ def enhance_newsletter_with_review_agent(newsletter_html, original_bullets):
         "Output the enhanced newsletter as HTML, maintaining the same structure but with more detail and educational content."
     )
     try:
-        response = openai.chat.completions.create(
-            model=get_model_name(),
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=5000,
-            temperature=0.3,
-        )
-        if response and response.choices and response.choices[0].message and response.choices[0].message.content:
-            return response.choices[0].message.content.strip(), response.usage
+        content, usage = make_ai_call(prompt, max_tokens=5000, temperature=0.3)
+        if content and content != "[Error:":
+            return content, usage
         else:
-            return newsletter_html, None  # Fallback to original if enhancement fails
+            return newsletter_html, usage  # Fallback to original if enhancement fails
     except Exception as e:
         print(f"Enhancement failed: {e}")
         return newsletter_html, None  # Fallback to original
@@ -506,8 +530,6 @@ def bold_first_phrase(bullet):
 
 
 def agentic_verify_links(emails, final_html):
-    import openai
-    openai.api_key = get_openai_api_key()
     # Build the list of source emails for the prompt
     email_list = "\n".join([
         f"{i+1}. Subject: {email['subject']} | Snippet: {email['body'][:200]} | Link: {get_gmail_link(email['msg_id'])}"
@@ -523,14 +545,8 @@ def agentic_verify_links(emails, final_html):
         "If not, provide specific, constructive feedback on how to improve the tone, structure, or content to make it more appealing and engaging."
     )
     print("\nRunning agentic verification of summary links and quality...\n")
-    response = openai.chat.completions.create(
-        model=get_model_name(),
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=1500,
-        temperature=0.0,
-    )
-    if response and response.choices and response.choices[0].message and response.choices[0].message.content:
-        qa_report = response.choices[0].message.content.strip()
+    qa_report, usage = make_ai_call(prompt, max_tokens=1500, temperature=0.0)
+    if qa_report and qa_report != "[Error:":
         print("Agentic QA Report:\n" + qa_report)
         return qa_report
     else:
@@ -600,6 +616,10 @@ def main():
         sender_name = extract_sender_name(sender)
         body = get_email_body(msg_detail)
         
+        # Skip emails from self
+        if "akshatk7@gmail.com" in sender.lower():
+            continue
+            
         # Track cost for classification
         is_relevant, usage = is_relevant_newsletter(subject, sender, body)
         if usage:
