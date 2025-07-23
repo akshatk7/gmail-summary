@@ -27,7 +27,7 @@ MODEL_CONFIG = {
 }
 
 # Current model setting - change this to switch models
-CURRENT_MODEL = "gemini-fast"  # Options: "fast", "balanced", "best", "gemini-fast", "gemini-balanced", "gemini-best"
+CURRENT_MODEL = "balanced"  # Options: "fast", "balanced", "best", "gemini-fast", "gemini-balanced", "gemini-best"
 
 def get_openai_api_key():
     """Load the OpenAI API key from the .env file."""
@@ -145,15 +145,24 @@ def make_openai_call(prompt, max_tokens=1000, temperature=0.5):
 def make_gemini_call(prompt, max_tokens=1000, temperature=0.5):
     """Make an API call to Gemini."""
     try:
+        # Configure the API key
         genai.configure(api_key=get_gemini_api_key())
+        
+        # Create the model
         model = genai.GenerativeModel(get_model_name())
+        
+        # Create generation config
+        generation_config = genai.GenerationConfig(
+            max_output_tokens=max_tokens,
+            temperature=temperature
+        )
+        
+        # Generate content
         response = model.generate_content(
             prompt,
-            generation_config=genai.GenerationConfig(
-                max_output_tokens=max_tokens,
-                temperature=temperature
-            )
+            generation_config=generation_config
         )
+        
         if response and response.text:
             # Create a mock usage object similar to OpenAI's
             class MockUsage:
@@ -597,8 +606,8 @@ def main():
     service = get_service()
     total_costs = []  # Track all API costs
     
-    # Fetch all emails from the past 7 days in Primary and Updates categories only
-    cutoff = (datetime.utcnow() - timedelta(days=7)).strftime("%Y/%m/%d")
+    # Fetch all emails from the past 2 days in Primary and Updates categories only
+    cutoff = (datetime.utcnow() - timedelta(days=2)).strftime("%Y/%m/%d")
     query = f"after:{cutoff} (category:primary OR category:updates)"
     resp = (
         service.users()
