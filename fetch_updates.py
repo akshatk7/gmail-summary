@@ -294,8 +294,8 @@ def get_gmail_link(msg_id):
     """Generate a Gmail web link to the email by its message ID."""
     # Properly encode the message ID for URL safety
     encoded_msg_id = urllib.parse.quote(msg_id, safe='')
-    # Use Gmail's RFC822 message ID search format - most reliable for specific emails
-    return f"https://mail.google.com/mail/u/0/#search/rfc822msgid:{encoded_msg_id}"
+    # Use the correct Gmail URL format that actually works
+    return f"https://mail.google.com/mail/u/0/#all/{encoded_msg_id}"
 
 
 def summarize_email_bullets(subject, sender, body, msg_id):
